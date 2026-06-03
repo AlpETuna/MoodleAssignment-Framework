@@ -1,0 +1,171 @@
+%% Monash University Assignment Report Template
+%% Auto-filled by the Report Agent — edit PLACEHOLDER values as needed
+
+\documentclass[12pt, a4paper]{article}
+
+%% ── Packages ──────────────────────────────────────────────────────────────
+\usepackage[a4paper, margin=2.5cm]{geometry}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{biblatex}
+\usepackage{setspace}
+\usepackage{fancyhdr}
+\usepackage{titling}
+\usepackage{enumerate}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+
+%% ── Monash colour palette ─────────────────────────────────────────────────
+\definecolor{monashblue}{RGB}{0, 61, 165}
+\definecolor{monashgrey}{RGB}{88, 89, 91}
+\definecolor{codebg}{RGB}{248, 248, 248}
+
+%% ── Code listing style ────────────────────────────────────────────────────
+\lstdefinestyle{monash}{
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  captionpos=b,
+  commentstyle=\color{monashgrey},
+  keywordstyle=\color{monashblue}\bfseries,
+  stringstyle=\color{red!70!black},
+  numbers=left,
+  numberstyle=\tiny\color{monashgrey},
+  frame=single,
+  rulecolor=\color{monashgrey!40},
+  tabsize=4,
+  showstringspaces=false,
+}
+\lstset{style=monash}
+
+%% ── Header / footer ──────────────────────────────────────────────────────
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{\textcolor{monashgrey}{\small UNIT_CODE}}
+\lhead{\textcolor{monashgrey}{\small STUDENT_NAME}}
+\rfoot{\textcolor{monashgrey}{\small Page \thepage}}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\footrulewidth}{0pt}
+
+%% ── Bibliography ─────────────────────────────────────────────────────────
+% \addbibresource{references.bib}
+
+%% ── Metadata (filled by Report Agent) ───────────────────────────────────
+\title{
+  \vspace{-1cm}
+  \includegraphics[width=4cm]{monash_logo.png}\\[0.5cm]
+  {\color{monashblue}\Large\bfseries UNIT_CODE: UNIT_NAME}\\[0.3cm]
+  {\large ASSIGNMENT_TITLE}
+}
+\author{
+  STUDENT_NAME\\
+  Student ID: STUDENT_ID\\
+  \texttt{STUDENT_EMAIL}
+}
+\date{Due: DUE_DATE}
+
+%% ═══════════════════════════════════════════════════════════════════════════
+\begin{document}
+%% ═══════════════════════════════════════════════════════════════════════════
+
+\maketitle
+\thispagestyle{empty}
+
+\begin{abstract}
+ABSTRACT_TEXT
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+%% ── 1. Introduction ──────────────────────────────────────────────────────
+\section{Introduction}
+\label{sec:intro}
+
+INTRODUCTION_TEXT
+
+%% ── 2. Background / Theory ───────────────────────────────────────────────
+\section{Background}
+\label{sec:background}
+
+BACKGROUND_TEXT
+
+%% ── 3. Methodology ───────────────────────────────────────────────────────
+\section{Methodology}
+\label{sec:method}
+
+METHODOLOGY_TEXT
+
+%% Example: algorithm pseudocode
+% \begin{algorithm}
+% \caption{ALGORITHM_NAME}
+% \begin{algorithmic}[1]
+%   \Require input $x$
+%   \Ensure output $y$
+%   \State $y \gets f(x)$
+% \end{algorithmic}
+% \end{algorithm}
+
+%% ── 4. Results ───────────────────────────────────────────────────────────
+\section{Results}
+\label{sec:results}
+
+RESULTS_TEXT
+
+%% Example: figure
+% \begin{figure}[H]
+%   \centering
+%   \includegraphics[width=0.8\linewidth]{figures/plot.png}
+%   \caption{FIGURE_CAPTION}
+%   \label{fig:result}
+% \end{figure}
+
+%% Example: table
+% \begin{table}[H]
+%   \centering
+%   \caption{TABLE_CAPTION}
+%   \begin{tabular}{@{}lrr@{}}
+%     \toprule
+%     Method & Accuracy & Time (s) \\
+%     \midrule
+%     Baseline & 0.72 & 1.2 \\
+%     Proposed & 0.91 & 2.4 \\
+%     \bottomrule
+%   \end{tabular}
+%   \label{tab:results}
+% \end{table}
+
+%% ── 5. Discussion ────────────────────────────────────────────────────────
+\section{Discussion}
+\label{sec:discussion}
+
+DISCUSSION_TEXT
+
+%% ── 6. Conclusion ────────────────────────────────────────────────────────
+\section{Conclusion}
+\label{sec:conclusion}
+
+CONCLUSION_TEXT
+
+%% ── References ───────────────────────────────────────────────────────────
+% \printbibliography
+
+%% ── Appendices ───────────────────────────────────────────────────────────
+\appendix
+
+\section{Code Listings}
+\label{app:code}
+
+% \lstinputlisting[language=Python, caption={main.py}]{../main.py}
+
+\end{document}

@@ -1,0 +1,578 @@
+{
+  "name": "Monash Assignment Pipeline",
+  "nodes": [
+
+    {
+      "id": "node-001",
+      "name": "Start Pipeline",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [240, 460],
+      "parameters": {}
+    },
+
+    {
+      "id": "node-002",
+      "name": "Pipeline Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3,
+      "position": [480, 460],
+      "parameters": {
+        "assignments": {
+          "values": [
+            { "name": "PIPELINE_DIR",   "stringValue": "/pipeline" },
+            { "name": "WORKSPACE_DIR",  "stringValue": "={{ $env.WORKSPACE_DIR || '/workspace' }}" },
+            { "name": "OUTPUT_BASE",    "stringValue": "/output" },
+            { "name": "MOODLE_URL",     "stringValue": "={{ $env.MOODLE_URL }}" },
+            { "name": "DOCKER_CONTAINER", "stringValue": "assignment-runner" }
+          ]
+        },
+        "options": { "includeBinary": false }
+      }
+    },
+
+    {
+      "id": "node-003",
+      "name": "Run Moodle Scraper",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [720, 460],
+      "parameters": {
+        "command": "cd /pipeline/playwright && node moodle-scraper.js 2>/dev/null"
+      },
+      "notes": "Runs Playwright to auth via Monash SSO + Duo MFA, then scrapes assignments. The script prints the DUO number to stderr so it appears in n8n logs — the user approves on their phone, then presses Enter in the n8n execution terminal."
+    },
+
+    {
+      "id": "node-004",
+      "name": "Parse Assignments",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [960, 460],
+      "parameters": {
+        "jsCode": "const raw = $input.first().json.stdout || $input.first().json.output || '';\nlet parsed;\ntry {\n  parsed = JSON.parse(raw);\n} catch(e) {\n  // Try extracting JSON from mixed output\n  const match = raw.match(/\\{[\\s\\S]*\\}/);\n  if (match) parsed = JSON.parse(match[0]);\n  else return [{ json: { error: 'Could not parse scraper output', raw } }];\n}\nconst assignments = parsed.assignments || [];\nif (assignments.length === 0) {\n  return [{ json: { message: 'No upcoming assignments found', count: 0, assignments: [] } }];\n}\nreturn assignments.map(a => ({ json: a }));"
+      }
+    },
+
+    {
+      "id": "node-005",
+      "name": "Has Assignments?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1200, 460],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "cond-001",
+              "leftValue": "={{ $json.title }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "notEmpty" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+
+    {
+      "id": "node-006",
+      "name": "No Assignments Found",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1440, 620],
+      "parameters": {},
+      "notes": "Pipeline ends here if Moodle has nothing due."
+    },
+
+    {
+      "id": "node-007",
+      "name": "Loop Each Assignment",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [1440, 360],
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      }
+    },
+
+    {
+      "id": "node-008",
+      "name": "Create Workspace",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1680, 360],
+      "parameters": {
+        "command": "mkdir -p /workspace/{{ $json.unitCode || 'unknown' }}/{{ $json.title.replace(/[^a-z0-9]/gi,'_').toLowerCase() }}"
+      }
+    },
+
+    {
+      "id": "node-009",
+      "name": "Build Analyzer Prompt",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3,
+      "position": [1920, 360],
+      "parameters": {
+        "assignments": {
+          "values": [
+            {
+              "name": "analyzerPrompt",
+              "stringValue": "=Analyze this Monash University assignment and return JSON:\n\nTitle: {{ $json.title }}\nUnit/Course: {{ $json.course }}\nDue Date: {{ $json.dueDate }}\nDescription:\n{{ $json.description }}\n\nSubmission Type: {{ $json.submissionType }}\nFiles available: {{ ($json.files || []).map(f => f.name).join(', ') || 'none' }}\n\nReturn ONLY valid JSON as described in your system prompt."
+            },
+            { "name": "title",        "stringValue": "={{ $json.title }}" },
+            { "name": "unitCode",     "stringValue": "={{ $json.unitCode }}" },
+            { "name": "dueDate",      "stringValue": "={{ $json.dueDate }}" },
+            { "name": "workspaceDir", "stringValue": "=/workspace/{{ $json.unitCode || 'unknown' }}/{{ $json.title.replace(/[^a-z0-9]/gi,'_').toLowerCase() }}" }
+          ]
+        },
+        "options": {}
+      }
+    },
+
+    {
+      "id": "node-010",
+      "name": "Analyzer Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.7,
+      "position": [2160, 360],
+      "parameters": {
+        "agentType": "toolsAgent",
+        "text": "={{ $json.analyzerPrompt }}",
+        "options": {
+          "systemMessage": "You are an expert assignment analyzer for Monash University students.\n\nYour job is to read an assignment brief and determine exactly what needs to be produced.\n\nOUTPUT FORMAT — respond ONLY with valid JSON matching this schema:\n{\n  \"unitCode\": \"FIT1045\",\n  \"assignmentName\": \"Assignment 1: Recursion\",\n  \"type\": \"code\" | \"report\" | \"both\" | \"math\",\n  \"language\": \"python\" | \"java\" | \"cpp\" | \"javascript\" | \"matlab\" | \"r\" | \"other\" | null,\n  \"hasLatexReport\": true | false,\n  \"hasMathematics\": true | false,\n  \"requiresTests\": true | false,\n  \"submissionFormat\": \"pdf\" | \"zip\" | \"code_only\" | \"mixed\",\n  \"components\": [\"component 1\", \"component 2\"],\n  \"dueDate\": \"date string\",\n  \"estimatedComplexity\": \"low\" | \"medium\" | \"high\",\n  \"keyRequirements\": [\"requirement 1\", \"requirement 2\"],\n  \"testingNotes\": \"how to test\",\n  \"reportSections\": [\"Introduction\", \"Method\"] | null,\n  \"submissionFiles\": [\"main.py\", \"report.pdf\"] | null\n}",
+          "maxIterations": 5,
+          "returnIntermediateSteps": false
+        }
+      }
+    },
+
+    {
+      "id": "node-011",
+      "name": "Analyzer LLM",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [2160, 220],
+      "parameters": {
+        "model": "claude-sonnet-4-6",
+        "options": { "maxTokensToSample": 2048, "temperature": 0.1 }
+      },
+      "credentials": {
+        "anthropicApi": { "id": "REPLACE_WITH_ANTHROPIC_CRED_ID", "name": "Anthropic account" }
+      }
+    },
+
+    {
+      "id": "node-012",
+      "name": "Read Brief Tool (Analyzer)",
+      "type": "@n8n/n8n-nodes-langchain.toolCode",
+      "typeVersion": 1,
+      "position": [2280, 220],
+      "parameters": {
+        "name": "read_brief",
+        "description": "Read the assignment brief text file from the workspace",
+        "language": "javaScript",
+        "jsCode": "const fs = require('fs');\nconst path = require('path');\nconst workdir = $fromAI('workdir', 'Workspace directory path', 'string');\nconst briefPath = path.join(workdir, 'ASSIGNMENT_BRIEF.txt');\nif (fs.existsSync(briefPath)) {\n  return fs.readFileSync(briefPath, 'utf8');\n}\nreturn 'Brief not found at: ' + briefPath;"
+      }
+    },
+
+    {
+      "id": "node-013",
+      "name": "Extract Analysis",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2400, 360],
+      "parameters": {
+        "jsCode": "const output = $input.first().json.output || $input.first().json.text || '';\nlet analysis;\ntry {\n  // Extract JSON from agent output\n  const match = output.match(/\\{[\\s\\S]*\\}/);\n  analysis = match ? JSON.parse(match[0]) : {};\n} catch(e) {\n  analysis = { type: 'both', language: 'python', hasLatexReport: true, hasMathematics: false };\n}\n// Merge with original assignment data\nconst original = $('Build Analyzer Prompt').first().json;\nreturn [{\n  json: {\n    ...original,\n    analysis,\n    taskType:  analysis.type || 'both',\n    language:  analysis.language || 'python',\n    needsCode:   ['code', 'both', 'math'].includes(analysis.type),\n    needsReport: ['report', 'both'].includes(analysis.type),\n    needsMath:   analysis.hasMathematics || analysis.type === 'math',\n  }\n}];"
+      }
+    },
+
+    {
+      "id": "node-014",
+      "name": "Route by Type",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [2640, 360],
+      "parameters": {
+        "mode": "rules",
+        "output": "first",
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "conditions": [
+                  { "leftValue": "={{ $json.needsCode }}", "rightValue": true, "operator": { "type": "boolean", "operation": "equal" } },
+                  { "leftValue": "={{ $json.needsReport }}", "rightValue": false, "operator": { "type": "boolean", "operation": "equal" } }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Code Only"
+            },
+            {
+              "conditions": {
+                "conditions": [
+                  { "leftValue": "={{ $json.needsReport }}", "rightValue": true, "operator": { "type": "boolean", "operation": "equal" } },
+                  { "leftValue": "={{ $json.needsCode }}", "rightValue": false, "operator": { "type": "boolean", "operation": "equal" } }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Report Only"
+            },
+            {
+              "conditions": {
+                "conditions": [
+                  { "leftValue": "={{ $json.needsCode }}", "rightValue": true, "operator": { "type": "boolean", "operation": "equal" } },
+                  { "leftValue": "={{ $json.needsReport }}", "rightValue": true, "operator": { "type": "boolean", "operation": "equal" } }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Code + Report"
+            }
+          ]
+        },
+        "fallbackOutput": "extra"
+      }
+    },
+
+    {
+      "id": "node-015",
+      "name": "Code Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.7,
+      "position": [2880, 220],
+      "parameters": {
+        "agentType": "toolsAgent",
+        "text": "=Complete this {{ $json.language || 'programming' }} assignment.\n\nAssignment: {{ $json.title }}\nUnit: {{ $json.unitCode }}\nDue: {{ $json.dueDate }}\nWorkspace: {{ $json.workspaceDir }}\n\nKey requirements:\n{{ ($json.analysis?.keyRequirements || []).join('\\n') }}\n\nTesting notes: {{ $json.analysis?.testingNotes || 'Write comprehensive tests' }}\n\nComponents to complete:\n{{ ($json.analysis?.components || []).join('\\n') }}\n\nStart by reading all files in the workspace, then write the solution code, write tests, run them in Docker, and fix until all pass.",
+        "options": {
+          "systemMessage": "You are an expert software engineer completing university assignments for Monash University.\n\nYou have access to tools to read/write files and run code in a Docker container.\n\nYOUR PROCESS:\n1. Read the assignment brief and any starter files with read_file and list_files\n2. Understand exactly what is required\n3. Write well-structured, correct code that satisfies all requirements\n4. Write comprehensive tests\n5. Run the tests using run_in_docker\n6. Fix failures and re-run until all tests pass\n7. Write a DONE.json file with your summary\n\nCODING STANDARDS:\n- Clean, readable code with meaningful variable names\n- Docstrings/comments only where logic is non-obvious\n- Handle edge cases mentioned in the spec\n- Follow language idioms (PEP 8 for Python, etc.)\n\nWhen done, write DONE.json: { \"status\": \"complete\", \"files\": [], \"testResults\": \"\", \"notes\": \"\" }",
+          "maxIterations": 20,
+          "returnIntermediateSteps": false
+        }
+      }
+    },
+
+    {
+      "id": "node-016",
+      "name": "Code Agent LLM",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [2760, 80],
+      "parameters": {
+        "model": "claude-sonnet-4-6",
+        "options": { "maxTokensToSample": 8096, "temperature": 0.2 }
+      },
+      "credentials": {
+        "anthropicApi": { "id": "REPLACE_WITH_ANTHROPIC_CRED_ID", "name": "Anthropic account" }
+      }
+    },
+
+    {
+      "id": "node-017",
+      "name": "Write File Tool",
+      "type": "@n8n/n8n-nodes-langchain.toolCode",
+      "typeVersion": 1,
+      "position": [2880, 80],
+      "parameters": {
+        "name": "write_file",
+        "description": "Write content to a file in the workspace. Creates parent directories as needed.",
+        "language": "javaScript",
+        "jsCode": "const fs   = require('fs');\nconst path = require('path');\nconst fse  = require('fs-extra');\nconst filePath = $fromAI('file_path', 'Absolute path to write', 'string');\nconst content  = $fromAI('content',   'File content to write',  'string');\nfse.mkdirpSync(path.dirname(filePath));\nfs.writeFileSync(filePath, content, 'utf8');\nreturn JSON.stringify({ success: true, path: filePath, bytes: content.length });"
+      }
+    },
+
+    {
+      "id": "node-018",
+      "name": "Read File Tool",
+      "type": "@n8n/n8n-nodes-langchain.toolCode",
+      "typeVersion": 1,
+      "position": [3000, 80],
+      "parameters": {
+        "name": "read_file",
+        "description": "Read the contents of a file.",
+        "language": "javaScript",
+        "jsCode": "const fs   = require('fs');\nconst filePath = $fromAI('file_path', 'Absolute path to read', 'string');\nif (!fs.existsSync(filePath)) return JSON.stringify({ error: 'File not found: ' + filePath });\nconst content = fs.readFileSync(filePath, 'utf8');\nreturn JSON.stringify({ content, path: filePath, bytes: content.length });"
+      }
+    },
+
+    {
+      "id": "node-019",
+      "name": "List Files Tool",
+      "type": "@n8n/n8n-nodes-langchain.toolCode",
+      "typeVersion": 1,
+      "position": [3120, 80],
+      "parameters": {
+        "name": "list_files",
+        "description": "List files and directories at a given path.",
+        "language": "javaScript",
+        "jsCode": "const fs   = require('fs');\nconst path = require('path');\nconst dirPath = $fromAI('dir_path', 'Directory path to list', 'string');\nif (!fs.existsSync(dirPath)) return JSON.stringify({ error: 'Directory not found: ' + dirPath });\nconst entries = fs.readdirSync(dirPath, { withFileTypes: true });\nreturn JSON.stringify({\n  path: dirPath,\n  entries: entries.map(e => ({\n    name:  e.name,\n    type:  e.isDirectory() ? 'dir' : 'file',\n    size:  e.isFile() ? fs.statSync(path.join(dirPath, e.name)).size : null\n  }))\n});"
+      }
+    },
+
+    {
+      "id": "node-020",
+      "name": "Run in Docker Tool",
+      "type": "@n8n/n8n-nodes-langchain.toolCode",
+      "typeVersion": 1,
+      "position": [3240, 80],
+      "parameters": {
+        "name": "run_in_docker",
+        "description": "Execute a shell command inside the assignment Docker container. Use this to run code, tests, compile programs, etc.",
+        "language": "javaScript",
+        "jsCode": "const { spawnSync } = require('child_process');\nconst command   = $fromAI('command',  'Shell command to execute',                 'string');\nconst workdir   = $fromAI('workdir',  'Working directory inside container',        'string');\nconst container = process.env.DOCKER_CONTAINER_NAME || 'assignment-runner';\nconst result = spawnSync('docker', [\n  'exec', '-w', workdir, container, 'bash', '-c', command\n], { timeout: 120000, encoding: 'utf8' });\nreturn JSON.stringify({\n  stdout:   result.stdout   || '',\n  stderr:   result.stderr   || '',\n  exitCode: result.status   ?? 1,\n  success:  result.status === 0,\n  command, workdir\n});"
+      }
+    },
+
+    {
+      "id": "node-021",
+      "name": "Math Tool (Code Agent)",
+      "type": "@n8n/n8n-nodes-langchain.toolCode",
+      "typeVersion": 1,
+      "position": [3360, 80],
+      "parameters": {
+        "name": "calculate_math",
+        "description": "Evaluate a mathematical expression using Mathematica MCP or SymPy fallback. Accepts Mathematica or Python sympy syntax. Returns numerical or symbolic result.",
+        "language": "javaScript",
+        "jsCode": "const { spawnSync } = require('child_process');\nconst expression = $fromAI('expression', 'Math expression to evaluate', 'string');\nconst mcpUrl     = process.env.MATHEMATICA_MCP_URL || '';\n// Try MCP first\nif (mcpUrl) {\n  try {\n    const resp = await fetch(`${mcpUrl}/evaluate`, {\n      method: 'POST', headers: {'Content-Type':'application/json'},\n      body: JSON.stringify({ expression }),\n      signal: AbortSignal.timeout(15000)\n    });\n    if (resp.ok) {\n      const data = await resp.json();\n      return JSON.stringify({ result: data.result, engine: 'mathematica', expression });\n    }\n  } catch {}\n}\n// SymPy fallback\nconst pyCode = `from sympy import *\\nx,y,z,n,t=symbols('x y z n t')\\ntry:\\n    r=eval(${JSON.stringify(expression)})\\n    print(repr(r))\\nexcept:\\n    r=sympify(${JSON.stringify(expression)})\\n    print(repr(r))`;\nconst r = spawnSync('docker',['exec','assignment-runner','python3','-c',pyCode],{timeout:15000,encoding:'utf8'});\nreturn JSON.stringify({ result: r.stdout.trim() || r.stderr.trim(), engine: 'sympy', expression });"
+      }
+    },
+
+    {
+      "id": "node-022",
+      "name": "Run Final Tests",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [3120, 220],
+      "parameters": {
+        "command": "docker exec -w {{ $json.workspaceDir.replace('/workspace','').startsWith('/') ? $json.workspaceDir : '/workspace/' + $json.workspaceDir.replace(/.*workspace[\\/]/,'') }} assignment-runner bash /usr/local/bin/run-tests 2>&1 | tail -50"
+      }
+    },
+
+    {
+      "id": "node-023",
+      "name": "Report Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.7,
+      "position": [2880, 520],
+      "parameters": {
+        "agentType": "toolsAgent",
+        "text": "=Write a complete academic report for this assignment in LaTeX.\n\nAssignment: {{ $json.title }}\nUnit: {{ $json.unitCode }}\nDue: {{ $json.dueDate }}\nWorkspace: {{ $json.workspaceDir }}\n\nRequired sections: {{ ($json.analysis?.reportSections || ['Introduction','Methodology','Results','Discussion','Conclusion']).join(', ') }}\n\nKey requirements:\n{{ ($json.analysis?.keyRequirements || []).join('\\n') }}\n\nInstructions:\n1. Read the assignment brief and any output/data files in the workspace\n2. Read the LaTeX template at /pipeline/templates/monash-assignment.tex\n3. Write a complete, professional report replacing all PLACEHOLDER values\n4. Save as {{ $json.workspaceDir }}/report.tex\n5. Compile with compile_latex to get report.pdf\n6. Fix any LaTeX errors and recompile until successful",
+        "options": {
+          "systemMessage": "You are an expert academic writer and LaTeX typesetter for Monash University.\n\nWrite formal, concise academic reports. Use proper LaTeX throughout.\nAll math must be in LaTeX math mode. Include figures and tables where appropriate.\nCompile and fix until the PDF builds successfully.\nWhen done write REPORT_DONE.json: { \"status\": \"complete\", \"reportPath\": \"path/to/report.pdf\" }",
+          "maxIterations": 20,
+          "returnIntermediateSteps": false
+        }
+      }
+    },
+
+    {
+      "id": "node-024",
+      "name": "Report Agent LLM",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [2760, 660],
+      "parameters": {
+        "model": "claude-sonnet-4-6",
+        "options": { "maxTokensToSample": 8096, "temperature": 0.3 }
+      },
+      "credentials": {
+        "anthropicApi": { "id": "REPLACE_WITH_ANTHROPIC_CRED_ID", "name": "Anthropic account" }
+      }
+    },
+
+    {
+      "id": "node-025",
+      "name": "Write LaTeX Tool",
+      "type": "@n8n/n8n-nodes-langchain.toolCode",
+      "typeVersion": 1,
+      "position": [2880, 660],
+      "parameters": {
+        "name": "write_latex",
+        "description": "Write a LaTeX .tex file. Automatically creates parent directories.",
+        "language": "javaScript",
+        "jsCode": "const fs   = require('fs');\nconst path = require('path');\nconst fse  = require('fs-extra');\nconst texPath = $fromAI('tex_path', 'Absolute path for .tex file', 'string');\nconst content = $fromAI('content',  'LaTeX source content',         'string');\nfse.mkdirpSync(path.dirname(texPath));\nfs.writeFileSync(texPath, content, 'utf8');\nreturn JSON.stringify({ success: true, path: texPath, bytes: content.length });"
+      }
+    },
+
+    {
+      "id": "node-026",
+      "name": "Compile LaTeX Tool",
+      "type": "@n8n/n8n-nodes-langchain.toolCode",
+      "typeVersion": 1,
+      "position": [3000, 660],
+      "parameters": {
+        "name": "compile_latex",
+        "description": "Compile a .tex file to PDF using pdflatex inside the Docker container. Returns success/error output.",
+        "language": "javaScript",
+        "jsCode": "const { spawnSync } = require('child_process');\nconst texPath   = $fromAI('tex_path', 'Absolute path to .tex file', 'string');\nconst path      = require('path');\nconst texDir    = path.dirname(texPath);\nconst texFile   = path.basename(texPath);\n// Convert host path to container path (assumes /workspace is shared)\nconst containerDir = texDir.replace(/.*workspace/, '/workspace');\nconst result = spawnSync('docker', [\n  'exec', '-w', containerDir, 'assignment-runner',\n  'pdflatex', '-interaction=nonstopmode', '-halt-on-error', texFile\n], { timeout: 120000, encoding: 'utf8' });\n// Run twice for cross-references\nif (result.status === 0) {\n  spawnSync('docker', ['exec', '-w', containerDir, 'assignment-runner',\n    'pdflatex', '-interaction=nonstopmode', texFile], { timeout: 60000, encoding: 'utf8' });\n}\nreturn JSON.stringify({\n  success:  result.status === 0,\n  stdout:   result.stdout?.slice(-3000) || '',\n  stderr:   result.stderr?.slice(-1000) || '',\n  pdfPath:  texPath.replace('.tex', '.pdf')\n});"
+      }
+    },
+
+    {
+      "id": "node-027",
+      "name": "Read File Tool (Report)",
+      "type": "@n8n/n8n-nodes-langchain.toolCode",
+      "typeVersion": 1,
+      "position": [3120, 660],
+      "parameters": {
+        "name": "read_file",
+        "description": "Read the contents of any file in the workspace.",
+        "language": "javaScript",
+        "jsCode": "const fs       = require('fs');\nconst filePath = $fromAI('file_path', 'Absolute path to file', 'string');\nif (!fs.existsSync(filePath)) return JSON.stringify({ error: 'Not found: ' + filePath });\nconst content  = fs.readFileSync(filePath, 'utf8');\nreturn JSON.stringify({ content: content.slice(0, 50000), path: filePath });"
+      }
+    },
+
+    {
+      "id": "node-028",
+      "name": "Math Tool (Report Agent)",
+      "type": "@n8n/n8n-nodes-langchain.toolCode",
+      "typeVersion": 1,
+      "position": [3240, 660],
+      "parameters": {
+        "name": "calculate_math",
+        "description": "Evaluate a math expression and return result + LaTeX representation. Accepts sympy syntax.",
+        "language": "javaScript",
+        "jsCode": "const { spawnSync } = require('child_process');\nconst expression = $fromAI('expression', 'Math expression to evaluate', 'string');\nconst pyCode = `from sympy import *\\nx,y,z,n,t=symbols('x y z n t')\\ntry:\\n    e=sympify(${JSON.stringify(expression)})\\n    print(repr(e), '|||', latex(e))\\nexcept Exception as err:\\n    print(f'ERROR:{err}', '|||', '')`;\nconst r = spawnSync('docker',['exec','assignment-runner','python3','-c',pyCode],{timeout:15000,encoding:'utf8'});\nconst [result, latexStr] = r.stdout.trim().split('|||');\nreturn JSON.stringify({ result: result?.trim(), latex: latexStr?.trim(), expression });"
+      }
+    },
+
+    {
+      "id": "node-029",
+      "name": "List Files Tool (Report)",
+      "type": "@n8n/n8n-nodes-langchain.toolCode",
+      "typeVersion": 1,
+      "position": [3360, 660],
+      "parameters": {
+        "name": "list_files",
+        "description": "List files in a directory.",
+        "language": "javaScript",
+        "jsCode": "const fs      = require('fs');\nconst path    = require('path');\nconst dirPath = $fromAI('dir_path', 'Directory to list', 'string');\nif (!fs.existsSync(dirPath)) return JSON.stringify({ error: 'Not found: ' + dirPath });\nconst entries = fs.readdirSync(dirPath, { withFileTypes: true });\nreturn JSON.stringify({ path: dirPath, entries: entries.map(e => ({ name: e.name, type: e.isDirectory()?'dir':'file' })) });"
+      }
+    },
+
+    {
+      "id": "node-030",
+      "name": "Merge Agent Outputs",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [3600, 360],
+      "parameters": {
+        "mode": "passThrough",
+        "output": "all",
+        "options": {}
+      }
+    },
+
+    {
+      "id": "node-031",
+      "name": "Package Submission",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [3840, 360],
+      "parameters": {
+        "command": "node /pipeline/scripts/package-submission.js --unit {{ $json.unitCode || 'UNKNOWN' }} --name {{ JSON.stringify($json.title || 'Assignment') }} --workspace {{ $json.workspaceDir }}"
+      }
+    },
+
+    {
+      "id": "node-032",
+      "name": "Build Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [4080, 360],
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst results = [];\nfor (const item of items) {\n  const raw = item.json.stdout || item.json.output || '{}';\n  let pkg = {};\n  try { const m = raw.match(/\\{[\\s\\S]*\\}/); if (m) pkg = JSON.parse(m[0]); } catch {}\n  results.push({\n    assignment:       item.json.title || 'Unknown',\n    unit:             item.json.unitCode || 'Unknown',\n    dueDate:          item.json.dueDate || 'Unknown',\n    outputFolder:     pkg.outputDir || 'See workspace',\n    submissionFiles:  pkg.submissionFiles || [],\n    readyToSubmit:    pkg.readyForSubmission || false,\n    packagedAt:       pkg.packagedAt || new Date().toISOString(),\n  });\n}\nconst readyCount = results.filter(r => r.readyToSubmit).length;\nconsole.log('\\n' + '='.repeat(60));\nconsole.log('MONASH ASSIGNMENT PIPELINE — RESULTS');\nconsole.log('='.repeat(60));\nfor (const r of results) {\n  const icon = r.readyToSubmit ? '✓ READY' : '⚠ INCOMPLETE';\n  console.log(`\\n[${icon}] ${r.unit}: ${r.assignment}`);\n  console.log(`  Due: ${r.dueDate}`);\n  console.log(`  Folder: ${r.outputFolder}`);\n  if (r.submissionFiles.length) console.log(`  Files: ${r.submissionFiles.join(', ')}`);\n}\nconsole.log(`\\n${readyCount}/${results.length} assignments ready for submission.`);\nconsole.log('='.repeat(60) + '\\n');\nreturn [{ json: { results, readyCount, total: results.length } }];"
+      }
+    },
+
+    {
+      "id": "node-033",
+      "name": "Next Assignment?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [4080, 520],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $('Loop Each Assignment').context.noItemsLeft }}",
+              "rightValue": false,
+              "operator": { "type": "boolean", "operation": "equal" }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    }
+
+  ],
+
+  "connections": {
+    "Start Pipeline":           { "main": [[{ "node": "Pipeline Config",        "type": "main", "index": 0 }]] },
+    "Pipeline Config":          { "main": [[{ "node": "Run Moodle Scraper",     "type": "main", "index": 0 }]] },
+    "Run Moodle Scraper":       { "main": [[{ "node": "Parse Assignments",      "type": "main", "index": 0 }]] },
+    "Parse Assignments":        { "main": [[{ "node": "Has Assignments?",       "type": "main", "index": 0 }]] },
+    "Has Assignments?": {
+      "main": [
+        [{ "node": "Loop Each Assignment", "type": "main", "index": 0 }],
+        [{ "node": "No Assignments Found", "type": "main", "index": 0 }]
+      ]
+    },
+    "Loop Each Assignment":     { "main": [[{ "node": "Create Workspace",       "type": "main", "index": 0 }]] },
+    "Create Workspace":         { "main": [[{ "node": "Build Analyzer Prompt",  "type": "main", "index": 0 }]] },
+    "Build Analyzer Prompt":    { "main": [[{ "node": "Analyzer Agent",         "type": "main", "index": 0 }]] },
+    "Analyzer LLM":             { "ai_languageModel": [[{ "node": "Analyzer Agent", "type": "ai_languageModel", "index": 0 }]] },
+    "Read Brief Tool (Analyzer)": { "ai_tool":        [[{ "node": "Analyzer Agent", "type": "ai_tool",          "index": 0 }]] },
+    "Analyzer Agent":           { "main": [[{ "node": "Extract Analysis",       "type": "main", "index": 0 }]] },
+    "Extract Analysis":         { "main": [[{ "node": "Route by Type",          "type": "main", "index": 0 }]] },
+    "Route by Type": {
+      "main": [
+        [{ "node": "Code Agent",          "type": "main", "index": 0 }],
+        [{ "node": "Report Agent",        "type": "main", "index": 0 }],
+        [{ "node": "Code Agent",          "type": "main", "index": 0 }]
+      ]
+    },
+    "Code Agent LLM":           { "ai_languageModel": [[{ "node": "Code Agent",   "type": "ai_languageModel", "index": 0 }]] },
+    "Write File Tool":          { "ai_tool":          [[{ "node": "Code Agent",   "type": "ai_tool",          "index": 0 }]] },
+    "Read File Tool":           { "ai_tool":          [[{ "node": "Code Agent",   "type": "ai_tool",          "index": 1 }]] },
+    "List Files Tool":          { "ai_tool":          [[{ "node": "Code Agent",   "type": "ai_tool",          "index": 2 }]] },
+    "Run in Docker Tool":       { "ai_tool":          [[{ "node": "Code Agent",   "type": "ai_tool",          "index": 3 }]] },
+    "Math Tool (Code Agent)":   { "ai_tool":          [[{ "node": "Code Agent",   "type": "ai_tool",          "index": 4 }]] },
+    "Code Agent":               { "main": [[{ "node": "Run Final Tests",         "type": "main", "index": 0 }]] },
+    "Run Final Tests":          { "main": [[{ "node": "Merge Agent Outputs",     "type": "main", "index": 0 }]] },
+    "Report Agent LLM":         { "ai_languageModel": [[{ "node": "Report Agent", "type": "ai_languageModel", "index": 0 }]] },
+    "Write LaTeX Tool":         { "ai_tool":          [[{ "node": "Report Agent", "type": "ai_tool",          "index": 0 }]] },
+    "Compile LaTeX Tool":       { "ai_tool":          [[{ "node": "Report Agent", "type": "ai_tool",          "index": 1 }]] },
+    "Read File Tool (Report)":  { "ai_tool":          [[{ "node": "Report Agent", "type": "ai_tool",          "index": 2 }]] },
+    "Math Tool (Report Agent)": { "ai_tool":          [[{ "node": "Report Agent", "type": "ai_tool",          "index": 3 }]] },
+    "List Files Tool (Report)": { "ai_tool":          [[{ "node": "Report Agent", "type": "ai_tool",          "index": 4 }]] },
+    "Report Agent":             { "main": [[{ "node": "Merge Agent Outputs",     "type": "main", "index": 1 }]] },
+    "Merge Agent Outputs":      { "main": [[{ "node": "Package Submission",      "type": "main", "index": 0 }]] },
+    "Package Submission":       { "main": [[{ "node": "Build Summary",           "type": "main", "index": 0 }]] },
+    "Build Summary":            { "main": [[{ "node": "Next Assignment?",        "type": "main", "index": 0 }]] },
+    "Next Assignment?": {
+      "main": [
+        [{ "node": "Loop Each Assignment", "type": "main", "index": 0 }],
+        []
+      ]
+    }
+  },
+
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+
+  "staticData": null,
+  "tags": ["monash", "assignments", "ai-agent"],
+  "triggerCount": 0,
+  "updatedAt": "2026-06-03T00:00:00.000Z",
+  "id": "monash-assignment-pipeline"
+}

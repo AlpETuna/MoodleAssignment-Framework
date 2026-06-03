@@ -1,0 +1,57 @@
+version: '3.9'
+
+services:
+  assignment-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: monash-assignment-runner
+    container_name: assignment-runner
+    volumes:
+      - ../workspace:/workspace
+    working_dir: /workspace
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+    networks:
+      - assignment-net
+    # Keep alive so we can exec into it
+    command: tail -f /dev/null
+    restart: unless-stopped
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n
+    ports:
+      - "5678:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ../workspace:/workspace
+      - ..:/pipeline
+    environment:
+      - N8N_HOST=localhost
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - NODE_ENV=production
+      - WEBHOOK_URL=http://localhost:5678/
+      - GENERIC_TIMEZONE=Australia/Melbourne
+      # Pass through env vars
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - MOODLE_URL=${MOODLE_URL}
+      - MOODLE_USERNAME=${MOODLE_USERNAME}
+      - MOODLE_PASSWORD=${MOODLE_PASSWORD}
+      - WORKSPACE_DIR=/workspace
+      - OUTPUT_BASE_DIR=/output
+      - DOCKER_IMAGE_NAME=${DOCKER_IMAGE_NAME:-monash-assignment-runner}
+      - MATHEMATICA_MCP_URL=${MATHEMATICA_MCP_URL:-}
+    networks:
+      - assignment-net
+    depends_on:
+      - assignment-runner
+
+volumes:
+  n8n_data:
+
+networks:
+  assignment-net:
+    driver: bridge

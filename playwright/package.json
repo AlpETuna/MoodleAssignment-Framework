@@ -1,0 +1,17 @@
+{
+  "name": "moodle-scraper",
+  "version": "1.0.0",
+  "description": "Playwright-based Moodle assignment scraper with SSO + Duo MFA",
+  "main": "moodle-scraper.js",
+  "scripts": {
+    "scrape": "node moodle-scraper.js",
+    "install-browsers": "npx playwright install chromium"
+  },
+  "dependencies": {
+    "playwright": "^1.44.0",
+    "dotenv": "^16.4.5",
+    "pdf-parse": "^1.1.1",
+    "node-fetch": "^3.3.2",
+    "fs-extra": "^11.2.0"
+  }
+}
